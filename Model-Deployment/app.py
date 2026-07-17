@@ -346,6 +346,15 @@ if __name__ == '__main__':
         db.init_db()
         load_model()
         instance_detector.update_settings(current_settings)
-        socketio.run(app, debug=True, host='localhost', port=3333)
+        import os
+
+port = int(os.environ.get("PORT", 8080))
+
+socketio.run(
+    app,
+    host="0.0.0.0",
+    port=port,
+    debug=False
+)
     except Exception as e:
         print(f"Fatal error starting app: {e}")
