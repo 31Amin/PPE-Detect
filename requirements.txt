@@ -1,8 +1,12 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch
+torchvision
 Flask
 Flask-SocketIO
+gunicorn
+eventlet
 opencv-python-headless
 ultralytics
 Pillow
 python-socketio
-eventlet
-gunicorn
