@@ -22,6 +22,7 @@ streaming = False
 stream_lock = threading.Lock()
 dev_mode = False
 db = Database()
+db.init_db()
 instance_detector = InstanceDetector()
 compliance_checker = ComplianceChecker()
 snapshot_manager = SnapshotManager()
@@ -343,7 +344,6 @@ def delete_instance(instance_id):
 
 if __name__ == '__main__':
     try:
-        db.init_db()
         load_model()
         instance_detector.update_settings(current_settings)
         socketio.run(app, debug=True, host='localhost', port=3333)
