@@ -404,7 +404,8 @@
                     </div> -->
                 </div>
                 <div class="video-container">
-                    <img id="videoFeed" alt="Video Feed">
+                    <video id="localVideo" autoplay playsinline muted style="display:none; width:0; height:0;"></video>
+                    <canvas id="videoFeed"></canvas>
                     <div class="video-placeholder" id="placeholder">
                         <i class="fas fa-video" style="font-size: 48px; margin-bottom: 16px; opacity: 0.3;"></i>
                         <p>Click "Start Stream" to begin detection</p>
@@ -466,33 +467,78 @@
         const socket = io();
         let isStreaming = false;
         let devMode = false;
+        let localStream = null;
+        let captureInterval = null;
 
-        function startStream() {
+        const localVideo = document.getElementById('localVideo');
+        const canvas = document.getElementById('videoFeed');
+        const ctx = canvas.getContext('2d');
+        const captureCanvas = document.createElement('canvas'); // off-screen, for encoding frames to send
+        const captureCtx = captureCanvas.getContext('2d');
+
+        // Draw whatever the server sends back (annotated frame) onto the visible canvas
+        socket.on('processed_frame', (data) => {
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+            };
+            img.src = 'data:image/jpeg;base64,' + data.image;
+        });
+
+        async function startStream() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            } catch (err) {
+                alert('تعذر الوصول إلى الكاميرا: ' + err.message);
+                return;
+            }
+
+            localVideo.srcObject = localStream;
+
             fetch('/start_stream', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => {
                     isStreaming = true;
-                    document.getElementById('videoFeed').src = '/video_feed?t=' + new Date().getTime();
-                    document.getElementById('videoFeed').style.display = 'block';
+                    canvas.style.display = 'block';
                     document.getElementById('placeholder').style.display = 'none';
                     document.getElementById('startBtn').disabled = true;
                     document.getElementById('stopBtn').disabled = false;
                     document.getElementById('statusIndicator').classList.add('active');
                     document.getElementById('statusIndicator').classList.remove('inactive');
+
+                    // Send a frame to the server ~every 200ms (~5 fps, gentle on CPU-only hosting)
+                    captureInterval = setInterval(() => {
+                        if (!isStreaming || localVideo.videoWidth === 0) return;
+                        captureCanvas.width = localVideo.videoWidth;
+                        captureCanvas.height = localVideo.videoHeight;
+                        captureCtx.drawImage(localVideo, 0, 0);
+                        const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.7);
+                        socket.emit('frame', { image: dataUrl });
+                    }, 200);
                 });
         }
 
         function stopStream() {
             isStreaming = false;
-            const videoFeed = document.getElementById('videoFeed');
-            videoFeed.src = '';
-            videoFeed.style.display = 'none';
+
+            if (captureInterval) {
+                clearInterval(captureInterval);
+                captureInterval = null;
+            }
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            canvas.style.display = 'none';
             document.getElementById('placeholder').style.display = 'block';
             document.getElementById('startBtn').disabled = false;
             document.getElementById('stopBtn').disabled = true;
             document.getElementById('statusIndicator').classList.remove('active');
             document.getElementById('statusIndicator').classList.add('inactive');
-            
+
             fetch('/stop_stream', { method: 'POST' })
                 .then(response => response.json())
                 .then(data => console.log('Stream stopped:', data.message))
