@@ -1,7 +1,7 @@
 from flask import Flask, render_template, Response, jsonify, request, send_file
 from flask_socketio import SocketIO, emit
 import cv2
-from ultralytics import YOLO
+from onnx_infer import OnnxYOLO
 import sqlite3
 from datetime import datetime, timedelta
 import os
@@ -62,28 +62,19 @@ def save_settings_to_file(settings):
 current_settings = load_settings()
 
 def load_model():
-    """Load YOLO model"""
+    """Load the ONNX-exported YOLO model (no PyTorch needed -> far less RAM)."""
     global model
-    model_path = '../Model-Training/Outputs/runs/detect/yolov8s_ppe_css_80_epochs/weights/best.pt'
+    model_path = 'best.onnx'  # lives right next to app.py inside Model-Deployment/
 
     abs_path = os.path.abspath(model_path)
     print(f"[DEBUG] cwd = {os.getcwd()}", flush=True)
-    print(f"[DEBUG] model_path (relative) = {model_path}", flush=True)
     print(f"[DEBUG] model_path (absolute) = {abs_path}", flush=True)
     print(f"[DEBUG] exists = {os.path.exists(model_path)}", flush=True)
     if os.path.exists(model_path):
-        size = os.path.getsize(model_path)
-        print(f"[DEBUG] file size = {size} bytes", flush=True)
-        with open(model_path, 'rb') as f:
-            first_bytes = f.read(20)
-        print(f"[DEBUG] first bytes = {first_bytes}", flush=True)
+        print(f"[DEBUG] file size = {os.path.getsize(model_path)} bytes", flush=True)
 
-    if os.path.exists(model_path) and os.path.getsize(model_path) > 1_000_000:
-        model = YOLO(model_path)
-        print("[DEBUG] Loaded custom-trained model successfully", flush=True)
-    else:
-        print("[DEBUG] Falling back to yolov8n.pt (custom weights missing or too small)", flush=True)
-        model = YOLO('yolov8n.pt')
+    model = OnnxYOLO(model_path)
+    print("[DEBUG] ONNX model loaded successfully", flush=True)
 
 import base64
 import numpy as np
@@ -110,7 +101,7 @@ def process_incoming_frame(frame):
     for result in results:
         boxes = result.boxes
         for box in boxes:
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            x1, y1, x2, y2 = box.xyxy[0]
             conf = float(box.conf[0])
             cls = int(box.cls[0])
             class_name = model.names[cls]
