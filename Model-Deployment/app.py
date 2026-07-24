@@ -65,112 +65,132 @@ def load_model():
     """Load YOLO model"""
     global model
     model_path = '../Model-Training/Outputs/runs/detect/yolov8s_ppe_css_80_epochs/weights/best.pt'
+
+    abs_path = os.path.abspath(model_path)
+    print(f"[DEBUG] cwd = {os.getcwd()}", flush=True)
+    print(f"[DEBUG] model_path (relative) = {model_path}", flush=True)
+    print(f"[DEBUG] model_path (absolute) = {abs_path}", flush=True)
+    print(f"[DEBUG] exists = {os.path.exists(model_path)}", flush=True)
     if os.path.exists(model_path):
+        size = os.path.getsize(model_path)
+        print(f"[DEBUG] file size = {size} bytes", flush=True)
+        with open(model_path, 'rb') as f:
+            first_bytes = f.read(20)
+        print(f"[DEBUG] first bytes = {first_bytes}", flush=True)
+
+    if os.path.exists(model_path) and os.path.getsize(model_path) > 1_000_000:
         model = YOLO(model_path)
+        print("[DEBUG] Loaded custom-trained model successfully", flush=True)
     else:
+        print("[DEBUG] Falling back to yolov8n.pt (custom weights missing or too small)", flush=True)
         model = YOLO('yolov8n.pt')
 
-def generate_frames():
-    """Generate video frames with instance detection"""
-    global camera, streaming, model, current_settings
-    
-    last_alert_time = 0
+import base64
+import numpy as np
+
+# Cooldown/interval state now lives outside the old camera loop,
+# since frames arrive one-by-one from the browser via socket.io.
+last_alert_time = 0
+last_snapshot_time = 0
+
+def process_incoming_frame(frame):
+    """Run detection on a single frame sent from the browser's webcam
+    and emit the results (annotated frame + stats) back over socket.io."""
+    global model, current_settings, last_alert_time, last_snapshot_time
+
+    if model is None:
+        load_model()
+
     ALERT_COOLDOWN = current_settings['non_compliance_delay']
-    last_snapshot_time = 0
     SNAPSHOT_INTERVAL = current_settings['instance_reset_timeout']
-    
-    while streaming:
-        try:
-            with stream_lock:
-                if camera is None or not camera.isOpened():
-                    break
-                
-                success, frame = camera.read()
-            
-            if not success or frame is None:
-                time.sleep(0.1)
-                continue
-            
-            results = model(frame)
-            
-            all_detections = []
-            for result in results:
-                boxes = result.boxes
-                for box in boxes:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf[0])
-                    cls = int(box.cls[0])
-                    class_name = model.names[cls]
-                    
-                    all_detections.append({
-                        'class': class_name,
-                        'confidence': conf,
-                        'bbox': [int(x1), int(y1), int(x2), int(y2)]
-                    })
-            
-            instance_result = instance_detector.process_detection(all_detections, dev_mode, current_settings)
-            is_compliant = compliance_checker.check_compliance(instance_result, dev_mode)
-            
-            annotated_frame = results[0].plot()
-            
-            current_time = time.time()
-            
-            if instance_result['should_capture'] and (current_time - last_snapshot_time) >= SNAPSHOT_INTERVAL:
-                snapshot_filename = instance_detector.get_next_snapshot_filename()
-                if snapshot_filename:
-                    snapshot_path = snapshot_manager.save_snapshot(frame, snapshot_filename)
-                    
-                    if snapshot_path:
-                        db.log_instance_snapshot(
-                            instance_id=instance_result['instance_id'],
-                            missing_ppe=instance_result['missing_ppe'],
-                            detected_ppe=instance_result['detected_ppe'],
-                            snapshot_path=snapshot_path
-                        )
-                        last_snapshot_time = current_time
-            
-            if not is_compliant and instance_result['has_person']:
-                overlay = annotated_frame.copy()
-                cv2.rectangle(overlay, (0, 0), (annotated_frame.shape[1], annotated_frame.shape[0]), 
-                             (0, 0, 255), 20)
-                annotated_frame = cv2.addWeighted(annotated_frame, 0.8, overlay, 0.2, 0)
-                
-                alert_text = "DEV MODE - TESTING" if dev_mode else "NON-COMPLIANT DETECTED"
-                cv2.putText(annotated_frame, alert_text, 
-                           (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-                
-                if current_time - last_alert_time > ALERT_COOLDOWN:
-                    db.log_alert("NON_COMPLIANCE", "PPE non-compliance detected", None)
-                    
-                    socketio.emit('alert', {
-                        'timestamp': datetime.now().isoformat(),
-                        'type': 'NON_COMPLIANCE',
-                        'description': 'PPE non-compliance detected',
-                        'dev_mode': dev_mode
-                    })
-                    last_alert_time = current_time
-            
-            socketio.emit('detection_update', {
+
+    results = model(frame)
+
+    all_detections = []
+    for result in results:
+        boxes = result.boxes
+        for box in boxes:
+            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+            conf = float(box.conf[0])
+            cls = int(box.cls[0])
+            class_name = model.names[cls]
+
+            all_detections.append({
+                'class': class_name,
+                'confidence': conf,
+                'bbox': [int(x1), int(y1), int(x2), int(y2)]
+            })
+
+    instance_result = instance_detector.process_detection(all_detections, dev_mode, current_settings)
+    is_compliant = compliance_checker.check_compliance(instance_result, dev_mode)
+
+    annotated_frame = results[0].plot()
+
+    current_time = time.time()
+
+    if instance_result['should_capture'] and (current_time - last_snapshot_time) >= SNAPSHOT_INTERVAL:
+        snapshot_filename = instance_detector.get_next_snapshot_filename()
+        if snapshot_filename:
+            snapshot_path = snapshot_manager.save_snapshot(frame, snapshot_filename)
+
+            if snapshot_path:
+                db.log_instance_snapshot(
+                    instance_id=instance_result['instance_id'],
+                    missing_ppe=instance_result['missing_ppe'],
+                    detected_ppe=instance_result['detected_ppe'],
+                    snapshot_path=snapshot_path
+                )
+                last_snapshot_time = current_time
+
+    if not is_compliant and instance_result['has_person']:
+        overlay = annotated_frame.copy()
+        cv2.rectangle(overlay, (0, 0), (annotated_frame.shape[1], annotated_frame.shape[0]),
+                     (0, 0, 255), 20)
+        annotated_frame = cv2.addWeighted(annotated_frame, 0.8, overlay, 0.2, 0)
+
+        alert_text = "DEV MODE - TESTING" if dev_mode else "NON-COMPLIANT DETECTED"
+        cv2.putText(annotated_frame, alert_text,
+                   (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        if current_time - last_alert_time > ALERT_COOLDOWN:
+            db.log_alert("NON_COMPLIANCE", "PPE non-compliance detected", None)
+
+            socketio.emit('alert', {
                 'timestamp': datetime.now().isoformat(),
-                'is_compliant': is_compliant,
-                'detection_details': instance_result,
+                'type': 'NON_COMPLIANCE',
+                'description': 'PPE non-compliance detected',
                 'dev_mode': dev_mode
             })
-            
-            ret, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-            if not ret:
-                continue
-                
-            frame_bytes = buffer.tobytes()
-            
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        
-        except GeneratorExit:
-            break
-        except Exception as e:
-            print(f"Error in generate_frames: {e}")
-            break
+            last_alert_time = current_time
+
+    socketio.emit('detection_update', {
+        'timestamp': datetime.now().isoformat(),
+        'is_compliant': is_compliant,
+        'detection_details': instance_result,
+        'dev_mode': dev_mode
+    })
+
+    ret, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ret:
+        return
+
+    frame_b64 = base64.b64encode(buffer.tobytes()).decode('utf-8')
+    socketio.emit('processed_frame', {'image': frame_b64})
+
+@socketio.on('frame')
+def handle_frame(data):
+    """Receive a base64 JPEG frame from the browser's webcam and process it."""
+    global streaming
+    if not streaming:
+        return
+    try:
+        img_data = base64.b64decode(data['image'].split(',')[-1])
+        np_arr = np.frombuffer(img_data, np.uint8)
+        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+        if frame is not None:
+            process_incoming_frame(frame)
+    except Exception as e:
+        print(f"Error in handle_frame: {e}")
 
 @app.route('/')
 def index():
@@ -224,49 +244,33 @@ def reset_settings():
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/video_feed')
-def video_feed():
-    """Video streaming route"""
-    try:
-        return Response(generate_frames(),
-                        mimetype='multipart/x-mixed-replace; boundary=frame')
-    except Exception as e:
-        print(f"Error in video_feed: {e}")
-        return '', 500
-
 @app.route('/start_stream', methods=['POST'])
 def start_stream():
-    """Start video streaming"""
-    global camera, streaming, model
-    
+    """Start video streaming (frames now come from the browser's webcam over socket.io)"""
+    global streaming, model
+
     try:
         if model is None:
             load_model()
-        
-        with stream_lock:
-            if camera is None or not camera.isOpened():
-                camera = cv2.VideoCapture(0)
-                camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        
+
         streaming = True
         return jsonify({'status': 'success', 'message': 'Stream started'})
     except Exception as e:
+        import traceback
+        print("[DEBUG] EXCEPTION in start_stream:", flush=True)
+        traceback.print_exc()
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/stop_stream', methods=['POST'])
 def stop_stream():
     """Stop video streaming"""
-    global camera, streaming
-    
+    global streaming
+
     try:
         streaming = False
-        time.sleep(0.3)
-        
-        with stream_lock:
-            if camera is not None:
-                camera.release()
-                camera = None
-        
         return jsonify({'status': 'success', 'message': 'Stream stopped'})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
