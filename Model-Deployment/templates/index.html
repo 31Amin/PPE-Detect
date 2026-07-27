@@ -492,9 +492,19 @@
     const img = new Image();
 
     img.onload = () => {
+        console.log("Image loaded:", img.width, img.height);
+
         canvas.width = img.width;
         canvas.height = img.height;
+
+        // ارسم خلفية حمراء
+        ctx.fillStyle = "red";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // ارسم الصورة فوقها
         ctx.drawImage(img, 0, 0);
+
+        console.log("Finished drawing");
     };
 
     img.src = 'data:image/jpeg;base64,' + data.image;
