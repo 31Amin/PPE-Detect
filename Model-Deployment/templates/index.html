@@ -489,15 +489,16 @@
         // server's actual processing speed instead of a fixed timer, so packets never
         // pile up faster than the (CPU-only, single-threaded) server can handle them.
         socket.on('processed_frame', (data) => {
-            const img = new Image();
-            img.onload = () => {
-                canvas.width = img.width;
-                canvas.height = img.height;
-                ctx.drawImage(img, 0, 0);
-            };
-            img.src = 'data:image/jpeg;base64,' + data.image;
-            sendNextFrame();
-        });
+    const img = new Image();
+
+    img.onload = () => {
+        canvas.width = img.width;
+        canvas.height = img.height;
+        ctx.drawImage(img, 0, 0);
+    };
+
+    img.src = 'data:image/jpeg;base64,' + data.image;
+});
 
         async function startStream() {
             try {
