@@ -1,348 +1,666 @@
-from flask import Flask, render_template, Response, jsonify, request, send_file
-from flask_socketio import SocketIO, emit
-import engineio.payload
-engineio.payload.Payload.max_decode_packets = 200  # safety net against "too many packets" errors
-import cv2
-from onnx_infer import OnnxYOLO
-import sqlite3
-from datetime import datetime, timedelta
-import os
-import threading
-import time
-from PIL import Image
-from detection_logic import InstanceDetector, ComplianceChecker, SnapshotManager
-from database import Database
-import json
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PPE Detection System</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
 
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'N/A'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+        :root {
+            --bg-primary: #f8f9fb;
+            --bg-secondary: #ffffff;
+            --text-primary: #1a202c;
+            --text-secondary: #718096;
+            --accent-blue: #4a90e2;
+            --accent-green: #48bb78;
+            --accent-red: #e65c5c;
+            --accent-orange: #ed8936;
+            --border-color: #e2e8f0;
+            --shadow-sm: 0 1px 3px rgba(0, 0, 0, 0.06);
+            --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+            --shadow-lg: 0 10px 24px rgba(0, 0, 0, 0.1);
+        }
 
-model = None
-camera = None
-streaming = False
-stream_lock = threading.Lock()
-dev_mode = False
-db = Database()
-db.init_db()
-instance_detector = InstanceDetector()
-compliance_checker = ComplianceChecker()
-snapshot_manager = SnapshotManager()
+        body {
+            font-family: 'Poppins', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            line-height: 1.6;
+        }
 
-SETTINGS_FILE = 'settings.json'
-DEFAULT_SETTINGS = {
-    'required_ppe': {
-        'helmet': True,
-        'vest': True,
-        'mask': False
-    },
-    'non_compliance_delay': 3,
-    'instance_reset_timeout': 5,
-    'detection_mode': 'single'  # 'single' or 'multi'
-}
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 24px;
+        }
 
-def load_settings():
-    """Load settings from file or return defaults"""
-    try:
-        if os.path.exists(SETTINGS_FILE):
-            with open(SETTINGS_FILE, 'r') as f:
-                return json.load(f)
-    except Exception as e:
-        print(f"Error loading settings: {e}")
-    return DEFAULT_SETTINGS.copy()
+        header {
+            background: var(--bg-secondary);
+            padding: 20px 0;
+            box-shadow: var(--shadow-sm);
+            margin-bottom: 32px;
+            border-bottom: 1px solid var(--border-color);
+        }
 
-def save_settings_to_file(settings):
-    """Save settings to file"""
-    try:
-        with open(SETTINGS_FILE, 'w') as f:
-            json.dump(settings, f, indent=2)
-        return True
-    except Exception as e:
-        print(f"Error saving settings: {e}")
-        return False
+        header h1 {
+            font-size: 26px;
+            font-weight: 600;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
 
-current_settings = load_settings()
+        .nav-links {
+            margin-top: 12px;
+            display: flex;
+            gap: 20px;
+        }
 
-def load_model():
-    """Load the ONNX-exported YOLO model (no PyTorch needed -> far less RAM)."""
-    global model
-    model_path = 'best.onnx'  # lives right next to app.py inside Model-Deployment/
+        .nav-links a {
+            color: var(--text-secondary);
+            text-decoration: none;
+            font-size: 14px;
+            font-weight: 500;
+            transition: color 0.2s;
+        }
 
-    abs_path = os.path.abspath(model_path)
-    print(f"[DEBUG] cwd = {os.getcwd()}", flush=True)
-    print(f"[DEBUG] model_path (absolute) = {abs_path}", flush=True)
-    print(f"[DEBUG] exists = {os.path.exists(model_path)}", flush=True)
-    if os.path.exists(model_path):
-        print(f"[DEBUG] file size = {os.path.getsize(model_path)} bytes", flush=True)
+        .nav-links a:hover {
+            color: var(--accent-blue);
+        }
 
-    model = OnnxYOLO(model_path)
-    print("[DEBUG] ONNX model loaded successfully", flush=True)
+        .nav-links a.active {
+            color: var(--accent-blue);
+            border-bottom: 2px solid var(--accent-blue);
+            padding-bottom: 2px;
+        }
 
-import base64
-import numpy as np
+        .grid {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 24px;
+            margin-bottom: 24px;
+        }
 
-# Cooldown/interval state now lives outside the old camera loop,
-# since frames arrive one-by-one from the browser via socket.io.
-last_alert_time = 0
-last_snapshot_time = 0
+        .card {
+            background: var(--bg-secondary);
+            border-radius: 12px;
+            padding: 28px;
+            box-shadow: var(--shadow-md);
+            transition: all 0.3s ease;
+            border: 1px solid var(--border-color);
+        }
 
-def process_incoming_frame(frame):
-    """Run detection on a single frame sent from the browser's webcam
-    and emit the results (annotated frame + stats) back over socket.io."""
-    global model, current_settings, last_alert_time, last_snapshot_time
+        .card:hover {
+            box-shadow: var(--shadow-lg);
+        }
 
-    if model is None:
-        load_model()
+        .card-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
 
-    ALERT_COOLDOWN = current_settings['non_compliance_delay']
-    SNAPSHOT_INTERVAL = current_settings['instance_reset_timeout']
+        .video-container {
+            position: relative;
+            width: 100%;
+            background: #000;
+            border-radius: 10px;
+            overflow: hidden;
+            min-height: 480px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
 
-    results = model(frame)
+        #videoFeed {
+            width: 100%;
+            height: auto;
+            display: none;
+        }
 
-    all_detections = []
-    for result in results:
-        boxes = result.boxes
-        for box in boxes:
-            x1, y1, x2, y2 = box.xyxy[0]
-            conf = float(box.conf[0])
-            cls = int(box.cls[0])
-            class_name = model.names[cls]
+        .video-placeholder {
+            color: #888;
+            text-align: center;
+        }
 
-            all_detections.append({
-                'class': class_name,
-                'confidence': conf,
-                'bbox': [int(x1), int(y1), int(x2), int(y2)]
-            })
+        .controls {
+            display: flex;
+            gap: 12px;
+            margin-top: 20px;
+            flex-wrap: wrap;
+        }
 
-    instance_result = instance_detector.process_detection(all_detections, dev_mode, current_settings)
-    is_compliant = compliance_checker.check_compliance(instance_result, dev_mode)
+        .btn {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            font-family: 'Poppins', sans-serif;
+        }
 
-    annotated_frame = results[0].plot()
+        .btn-primary {
+            background: var(--accent-blue);
+            color: white;
+        }
 
-    current_time = time.time()
+        .btn-primary:hover {
+            background: #3a7bc8;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(74, 144, 226, 0.3);
+        }
 
-    if instance_result['should_capture'] and (current_time - last_snapshot_time) >= SNAPSHOT_INTERVAL:
-        snapshot_filename = instance_detector.get_next_snapshot_filename()
-        if snapshot_filename:
-            snapshot_path = snapshot_manager.save_snapshot(frame, snapshot_filename)
+        .btn-danger {
+            background: var(--accent-red);
+            color: white;
+        }
 
-            if snapshot_path:
-                db.log_instance_snapshot(
-                    instance_id=instance_result['instance_id'],
-                    missing_ppe=instance_result['missing_ppe'],
-                    detected_ppe=instance_result['detected_ppe'],
-                    snapshot_path=snapshot_path
-                )
-                last_snapshot_time = current_time
+        .btn-danger:hover {
+            background: #d14545;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(230, 92, 92, 0.3);
+        }
 
-    if not is_compliant and instance_result['has_person']:
-        overlay = annotated_frame.copy()
-        cv2.rectangle(overlay, (0, 0), (annotated_frame.shape[1], annotated_frame.shape[0]),
-                     (0, 0, 255), 20)
-        annotated_frame = cv2.addWeighted(annotated_frame, 0.8, overlay, 0.2, 0)
+        .btn-warning {
+            background: var(--accent-orange);
+            color: white;
+        }
 
-        alert_text = "DEV MODE - TESTING" if dev_mode else "NON-COMPLIANT DETECTED"
-        cv2.putText(annotated_frame, alert_text,
-                   (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        .btn-warning:hover {
+            background: #dd7421;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(237, 137, 54, 0.3);
+        }
 
-        if current_time - last_alert_time > ALERT_COOLDOWN:
-            db.log_alert("NON_COMPLIANCE", "PPE non-compliance detected", None)
+        .btn-warning.active {
+            background: #dd7421;
+            box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.2);
+        }
 
-            socketio.emit('alert', {
-                'timestamp': datetime.now().isoformat(),
-                'type': 'NON_COMPLIANCE',
-                'description': 'PPE non-compliance detected',
-                'dev_mode': dev_mode
-            })
-            last_alert_time = current_time
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
 
-    socketio.emit('detection_update', {
-        'timestamp': datetime.now().isoformat(),
-        'is_compliant': is_compliant,
-        'detection_details': instance_result,
-        'dev_mode': dev_mode
-    })
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
+            margin-bottom: 24px;
+        }
 
-    ret, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
-    if not ret:
-        return
+        .stat-card {
+            background: var(--bg-primary);
+            padding: 20px;
+            border-radius: 10px;
+            border-left: 4px solid var(--accent-blue);
+        }
 
-    frame_b64 = base64.b64encode(buffer.tobytes()).decode('utf-8')
-    socketio.emit('processed_frame', {'image': frame_b64})
+        .stat-card.danger {
+            border-left-color: var(--accent-red);
+        }
 
-@socketio.on('frame')
-def handle_frame(data):
-    """Receive a base64 JPEG frame from the browser's webcam and process it."""
-    global streaming
-    if not streaming:
-        return
-    try:
-        img_data = base64.b64decode(data['image'].split(',')[-1])
-        np_arr = np.frombuffer(img_data, np.uint8)
-        frame = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
-        if frame is not None:
-            process_incoming_frame(frame)
-    except Exception as e:
-        print(f"Error in handle_frame: {e}")
+        .stat-value {
+            font-size: 32px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
 
-@app.route('/')
-def index():
-    """Main page"""
-    return render_template('index.html')
+        .stat-label {
+            font-size: 13px;
+            color: var(--text-secondary);
+            margin-top: 6px;
+            font-weight: 500;
+        }
 
-@app.route('/review')
-def review():
-    """Review page for instances and snapshots"""
-    return render_template('review.html')
+        .alert-list {
+            max-height: 320px;
+            overflow-y: auto;
+        }
 
-@app.route('/settings')
-def settings():
-    """Settings page"""
-    return render_template('settings.html')
+        .alert-item {
+            padding: 14px;
+            background: var(--bg-primary);
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid var(--accent-red);
+            animation: slideIn 0.3s ease;
+        }
 
-@app.route('/api/settings', methods=['GET'])
-def get_settings():
-    """Get current settings"""
-    return jsonify(current_settings)
+        @keyframes slideIn {
+            from {
+                opacity: 0;
+                transform: translateX(-10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateX(0);
+            }
+        }
 
-@app.route('/api/settings', methods=['POST'])
-def update_settings():
-    """Update settings"""
-    global current_settings
-    try:
-        new_settings = request.json
-        current_settings = new_settings
-        
-        instance_detector.update_settings(new_settings)
-        
-        if save_settings_to_file(new_settings):
-            return jsonify({'status': 'success', 'message': 'Settings saved'})
-        else:
-            return jsonify({'status': 'error', 'message': 'Failed to save settings to file'}), 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        .alert-time {
+            font-size: 12px;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
 
-@app.route('/api/settings/reset', methods=['POST'])
-def reset_settings():
-    """Reset settings to defaults"""
-    global current_settings
-    try:
-        current_settings = DEFAULT_SETTINGS.copy()
-        instance_detector.update_settings(current_settings)
-        
-        if save_settings_to_file(current_settings):
-            return jsonify({'status': 'success', 'message': 'Settings reset to defaults', 'settings': current_settings})
-        else:
-            return jsonify({'status': 'error', 'message': 'Failed to save settings to file'}), 500
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        .alert-message {
+            font-size: 14px;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
 
-@app.route('/start_stream', methods=['POST'])
-def start_stream():
-    """Start video streaming (frames now come from the browser's webcam over socket.io)"""
-    global streaming, model
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
 
-    try:
-        if model is None:
-            load_model()
+        .status-indicator.active {
+            background: var(--accent-green);
+            animation: pulse 2s infinite;
+        }
 
-        streaming = True
-        return jsonify({'status': 'success', 'message': 'Stream started'})
-    except Exception as e:
-        import traceback
-        print("[DEBUG] EXCEPTION in start_stream:", flush=True)
-        traceback.print_exc()
-        import sys
-        sys.stdout.flush()
-        sys.stderr.flush()
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        .status-indicator.inactive {
+            background: var(--text-secondary);
+        }
 
-@app.route('/stop_stream', methods=['POST'])
-def stop_stream():
-    """Stop video streaming"""
-    global streaming
+        @keyframes pulse {
+            0%, 100% {
+                opacity: 1;
+            }
+            50% {
+                opacity: 0.5;
+            }
+        }
 
-    try:
-        streaming = False
-        return jsonify({'status': 'success', 'message': 'Stream stopped'})
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        .compliance-status {
+            padding: 14px;
+            border-radius: 8px;
+            text-align: center;
+            font-weight: 600;
+            margin-top: 20px;
+            font-size: 15px;
+        }
 
-@app.route('/toggle_dev_mode', methods=['POST'])
-def toggle_dev_mode():
-    """Toggle dev/testing mode"""
-    global dev_mode
-    dev_mode = not dev_mode
-    return jsonify({'status': 'success', 'dev_mode': dev_mode, 
-                   'message': f'Dev mode {"enabled" if dev_mode else "disabled"}'})
+        .compliance-status.compliant {
+            background: rgba(72, 187, 120, 0.12);
+            color: var(--accent-green);
+        }
 
-@app.route('/stats')
-def get_stats():
-    """Get detection statistics"""
-    stats = db.get_statistics()
-    stats['dev_mode'] = dev_mode
-    return jsonify(stats)
+        .compliance-status.non-compliant {
+            background: rgba(230, 92, 92, 0.12);
+            color: var(--accent-red);
+        }
 
-@app.route('/api/instances')
-def get_instances():
-    """Get all detection instances"""
-    try:
-        sort_by = request.args.get('sort', 'first_detected')
-        sort_order = request.args.get('order', 'desc')
-        
-        instances = db.get_all_instances(sort_by, sort_order)
-        return jsonify(instances)
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        .dev-mode-indicator {
+            background: rgba(237, 137, 54, 0.12);
+            color: var(--accent-orange);
+            padding: 6px 14px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            animation: devBlink 2s infinite;
+        }
 
-@app.route('/api/instance/<instance_id>/snapshots')
-def get_instance_snapshots(instance_id):
-    """Get all snapshots for a specific instance"""
-    try:
-        data = db.get_instance_snapshots(instance_id)
-        if data:
-            return jsonify(data)
-        return jsonify({'error': 'Instance not found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        @keyframes devBlink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
 
-@app.route('/download_snapshot/<path:filename>')
-def download_snapshot(filename):
-    """Download snapshot"""
-    try:
-        filepath = filename if os.path.isabs(filename) else os.path.join('snapshots', filename)
-        if os.path.exists(filepath):
-            return send_file(filepath, as_attachment=True)
-        return jsonify({'error': 'File not found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        .full-width {
+            grid-column: 1 / -1;
+        }
 
-@app.route('/snapshots/<path:filename>')
-def serve_snapshot(filename):
-    """Serve snapshot for viewing"""
-    try:
-        filepath = os.path.join('snapshots', filename)
-        if os.path.exists(filepath):
-            return send_file(filepath, mimetype='image/jpeg')
-        return jsonify({'error': 'File not found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        .person-details {
+            background: var(--bg-primary);
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 10px;
+            border-left: 3px solid var(--accent-blue);
+        }
 
-@app.route('/api/delete_instance/<instance_id>', methods=['DELETE'])
-def delete_instance(instance_id):
-    """Delete an instance and its snapshot"""
-    try:
-        success = db.delete_instance(instance_id)
-        if success:
-            return jsonify({'status': 'success', 'message': 'Instance deleted'})
-        return jsonify({'error': 'Failed to delete instance'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        .person-details.non-compliant {
+            border-left-color: var(--accent-red);
+        }
 
-if __name__ == '__main__':
-    try:
-        load_model()
-        instance_detector.update_settings(current_settings)
-        socketio.run(app, debug=True, host='localhost', port=3333)
-    except Exception as e:
-        print(f"Fatal error starting app: {e}")
+        .ppe-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            background: rgba(74, 144, 226, 0.1);
+            border-radius: 12px;
+            font-size: 12px;
+            margin: 4px 4px 4px 0;
+            color: var(--accent-blue);
+            font-weight: 500;
+        }
+
+        .ppe-badge.missing {
+            background: rgba(230, 92, 92, 0.1);
+            color: var(--accent-red);
+        }
+
+        @media (max-width: 968px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <div class="container">
+            <h1>
+                <i class="fas fa-shield-alt"></i> PPE Detection System
+            </h1>
+            <div class="nav-links">
+                <a href="/" class="active">Live Detection</a>
+                <a href="/review">Review Instances</a>
+                <a href="/settings">Settings</a>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="grid">
+            <div class="card">
+                <div class="card-title">
+                    <div>
+                        <span class="status-indicator" id="statusIndicator"></span>
+                        Live Detection Feed
+                    </div>
+                    <!-- <div id="devModeIndicator" class="dev-mode-indicator" style="display: none;">
+                        <i class="fas fa-flask"></i> DEV MODE
+                    </div> -->
+                </div>
+                <div class="video-container">
+                    <video id="localVideo" autoplay playsinline muted style="display:none; width:0; height:0;"></video>
+                    <canvas id="videoFeed"></canvas>
+                    <div class="video-placeholder" id="placeholder">
+                        <i class="fas fa-video" style="font-size: 48px; margin-bottom: 16px; opacity: 0.3;"></i>
+                        <p>Click "Start Stream" to begin detection</p>
+                    </div>
+                </div>
+                <div class="controls">
+                    <button class="btn btn-primary" id="startBtn" onclick="startStream()">
+                        <i class="fas fa-play"></i> Start Stream
+                    </button>
+                    <button class="btn btn-danger" id="stopBtn" onclick="stopStream()" disabled>
+                        <i class="fas fa-stop"></i> Stop Stream
+                    </button>
+                    <!-- <button class="btn btn-warning" id="devModeBtn" onclick="toggleDevMode()">
+                        <i class="fas fa-flask"></i> Toggle Dev Mode
+                    </button> -->
+                </div>
+                <div class="compliance-status compliant" id="complianceStatus">
+                    <i class="fas fa-check-circle"></i> ALL COMPLIANT
+                </div>
+            </div>
+
+            <div>
+                <div class="card">
+                    <div class="card-title">Detection Statistics</div>
+                    <div class="stats-grid">
+                        <div class="stat-card danger">
+                            <div class="stat-value" id="totalDetections">0</div>
+                            <div class="stat-label">Total Instances</div>
+                        </div>
+                        <div class="stat-card danger">
+                            <div class="stat-value" id="nonCompliantCount">0</div>
+                            <div class="stat-label">Non-Compliant</div>
+                        </div>
+                        <div class="stat-card danger">
+                            <div class="stat-value" id="totalAlerts">0</div>
+                            <div class="stat-label">Total Alerts</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card" style="margin-top: 24px;">
+                    <div class="card-title">Recent Alerts</div>
+                    <div class="alert-list" id="alertList">
+                        <p style="color: var(--text-secondary); text-align: center; padding: 20px;">No alerts yet</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="card full-width">
+            <div class="card-title">Current Detection</div>
+            <div id="currentPersons">
+                <p style="color: var(--text-secondary);">No persons detected</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let isStreaming = false;
+        let devMode = false;
+        let localStream = null;
+
+        const localVideo = document.getElementById('localVideo');
+        const canvas = document.getElementById('videoFeed');
+        const ctx = canvas.getContext('2d');
+        const captureCanvas = document.createElement('canvas'); // off-screen, for encoding frames to send
+        const captureCtx = captureCanvas.getContext('2d');
+
+        function sendNextFrame() {
+            if (!isStreaming || localVideo.videoWidth === 0) return;
+            captureCanvas.width = localVideo.videoWidth;
+            captureCanvas.height = localVideo.videoHeight;
+            captureCtx.drawImage(localVideo, 0, 0);
+            const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.7);
+            socket.emit('frame', { image: dataUrl });
+        }
+
+        // Draw whatever the server sends back (annotated frame) onto the visible canvas,
+        // then immediately ask for the next frame. This paces sending to match the
+        // server's actual processing speed instead of a fixed timer, so packets never
+        // pile up faster than the (CPU-only, single-threaded) server can handle them.
+        socket.on('processed_frame', (data) => {
+            const img = new Image();
+            img.onload = () => {
+                canvas.width = img.width;
+                canvas.height = img.height;
+                ctx.drawImage(img, 0, 0);
+            };
+            img.src = 'data:image/jpeg;base64,' + data.image;
+            sendNextFrame();
+        });
+
+        async function startStream() {
+            try {
+                localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+            } catch (err) {
+                alert('تعذر الوصول إلى الكاميرا: ' + err.message);
+                return;
+            }
+
+            localVideo.srcObject = localStream;
+
+            fetch('/start_stream', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    isStreaming = true;
+                    canvas.style.display = 'block';
+                    document.getElementById('placeholder').style.display = 'none';
+                    document.getElementById('startBtn').disabled = true;
+                    document.getElementById('stopBtn').disabled = false;
+                    document.getElementById('statusIndicator').classList.add('active');
+                    document.getElementById('statusIndicator').classList.remove('inactive');
+
+                    // Kick off the frame loop; each response triggers the next request (see
+                    // the processed_frame handler above), pacing to the server's own speed.
+                    sendNextFrame();
+                });
+        }
+
+        function stopStream() {
+            isStreaming = false;
+
+            if (localStream) {
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+
+            canvas.style.display = 'none';
+            document.getElementById('placeholder').style.display = 'block';
+            document.getElementById('startBtn').disabled = false;
+            document.getElementById('stopBtn').disabled = true;
+            document.getElementById('statusIndicator').classList.remove('active');
+            document.getElementById('statusIndicator').classList.add('inactive');
+
+            fetch('/stop_stream', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => console.log('Stream stopped:', data.message))
+                .catch(error => console.error('Error stopping stream:', error));
+        }
+
+        function toggleDevMode() {
+            fetch('/toggle_dev_mode', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    devMode = data.dev_mode;
+                    const btn = document.getElementById('devModeBtn');
+                    const indicator = document.getElementById('devModeIndicator');
+                    if (devMode) {
+                        if (btn) btn.classList.add('active');
+                        if (indicator) indicator.style.display = 'inline-flex';
+                    } else {
+                        if (btn) btn.classList.remove('active');
+                        if (indicator) indicator.style.display = 'none';
+                    }
+                    alert(data.message);
+                })
+                .catch(error => console.error('Error toggling dev mode:', error));
+        }
+
+        socket.on('alert', function(data) {
+            const alertList = document.getElementById('alertList');
+            
+            if (alertList.querySelector('p')) {
+                alertList.innerHTML = '';
+            }
+            
+            const alertItem = document.createElement('div');
+            alertItem.className = 'alert-item';
+            
+            const time = new Date(data.timestamp).toLocaleTimeString();
+            const devModeTag = data.dev_mode ? ' <span style="color: var(--accent-orange);">[DEV]</span>' : '';
+            alertItem.innerHTML = `
+                <div class="alert-time"><i class="fas fa-exclamation-triangle"></i> ${time}${devModeTag}</div>
+                <div class="alert-message">${data.description}</div>
+            `;
+            
+            alertList.insertBefore(alertItem, alertList.firstChild);
+            updateStats();
+        });
+
+        socket.on('detection_update', function(data) {
+            const statusDiv = document.getElementById('complianceStatus');
+            if (data.is_compliant) {
+                statusDiv.className = 'compliance-status compliant';
+                statusDiv.innerHTML = '<i class="fas fa-check-circle"></i> ALL COMPLIANT';
+            } else {
+                statusDiv.className = 'compliance-status non-compliant';
+                statusDiv.innerHTML = '<i class="fas fa-exclamation-triangle"></i> NON-COMPLIANT DETECTED';
+            }
+            
+            const personsDiv = document.getElementById('currentPersons');
+            if (data.detection_details && data.detection_details.has_person) {
+                const details = data.detection_details;
+                const statusIcon = details.is_compliant ? 
+                    '<i class="fas fa-check-circle" style="color: var(--accent-green);"></i>' : 
+                    '<i class="fas fa-times-circle" style="color: var(--accent-red);"></i>';
+                
+                let ppeHtml = '';
+                if (details.detected_ppe.length > 0) {
+                    ppeHtml += '<div style="margin-top: 8px;">Detected: ';
+                    ppeHtml += details.detected_ppe.map(ppe => 
+                        `<span class="ppe-badge">${ppe}</span>`
+                    ).join('');
+                    ppeHtml += '</div>';
+                }
+                
+                if (details.missing_ppe.length > 0) {
+                    ppeHtml += '<div style="margin-top: 4px;">Missing: ';
+                    ppeHtml += details.missing_ppe.map(ppe => 
+                        `<span class="ppe-badge missing">${ppe}</span>`
+                    ).join('');
+                    ppeHtml += '</div>';
+                }
+                
+                personsDiv.innerHTML = `
+                    <div class="person-details ${details.is_compliant ? '' : 'non-compliant'}">
+                        <div style="font-weight: 600; font-size: 14px;">
+                            ${statusIcon} Current Detection
+                        </div>
+                        ${ppeHtml}
+                    </div>
+                `;
+            } else {
+                personsDiv.innerHTML = '<p style="color: var(--text-secondary);">No persons detected</p>';
+            }
+        });
+
+        function updateStats() {
+            fetch('/stats')
+                .then(response => response.json())
+                .then(data => {
+                    document.getElementById('totalDetections').textContent = data.total_detections;
+                    document.getElementById('nonCompliantCount').textContent = data.non_compliant_count;
+                    document.getElementById('totalAlerts').textContent = data.total_alerts;
+                    
+                    devMode = data.dev_mode;
+                    const indicator = document.getElementById('devModeIndicator');
+                    const btn = document.getElementById('devModeBtn');
+                    if (devMode) {
+                        if (indicator) indicator.style.display = 'inline-flex';
+                        if (btn) btn.classList.add('active');
+                    } else {
+                        if (indicator) indicator.style.display = 'none';
+                        if (btn) btn.classList.remove('active');
+                    }
+                })
+                .catch(error => console.error('Error fetching stats:', error));
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            updateStats();
+            setInterval(updateStats, 5000);
+            document.getElementById('statusIndicator').classList.add('inactive');
+        });
+    </script>
+</body>
+</html>
