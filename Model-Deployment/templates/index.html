@@ -488,7 +488,7 @@
         // then immediately ask for the next frame. This paces sending to match the
         // server's actual processing speed instead of a fixed timer, so packets never
         // pile up faster than the (CPU-only, single-threaded) server can handle them.
-        socket.on('processed_frame', (data) => {
+      socket.on('processed_frame', (data) => {
     const img = new Image();
 
     img.onload = () => {
@@ -497,19 +497,18 @@
         canvas.width = img.width;
         canvas.height = img.height;
 
-        // ارسم خلفية حمراء
-        ctx.fillStyle = "red";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-        // ارسم الصورة فوقها
         ctx.drawImage(img, 0, 0);
 
         console.log("Finished drawing");
+
+        // أرسل الإطار التالي
+        if (isStreaming) {
+            sendNextFrame();
+        }
     };
 
     img.src = 'data:image/jpeg;base64,' + data.image;
 });
-
         async function startStream() {
             try {
                 localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
