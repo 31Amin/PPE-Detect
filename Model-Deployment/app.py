@@ -1,5 +1,7 @@
 from flask import Flask, render_template, Response, jsonify, request, send_file
 from flask_socketio import SocketIO, emit
+import engineio.payload
+engineio.payload.Payload.max_decode_packets = 200  # safety net against "too many packets" errors
 import cv2
 from onnx_infer import OnnxYOLO
 import sqlite3
